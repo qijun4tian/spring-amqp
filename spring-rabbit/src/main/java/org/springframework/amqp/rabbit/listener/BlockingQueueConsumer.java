@@ -17,16 +17,7 @@
 package org.springframework.amqp.rabbit.listener;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -34,6 +25,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
@@ -43,6 +36,7 @@ import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.ChannelProxy;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactoryUtils;
@@ -156,6 +150,15 @@ public class BlockingQueueConsumer {
 
 	volatile boolean declaring;
 
+	private Map<Integer,BlockingQueueConsumer> shardQueueConsumerMap = new ConcurrentHashMap<Integer, BlockingQueueConsumer>();
+
+	private ObjectMapper objectMapper = new ObjectMapper();
+
+	private String keyProperty;
+
+	private int prime;
+
+	private SimpleMessageListenerContainer simpleMessageListenerContainer;
 	/**
 	 * Create a consumer. The consumer must not attempt to use
 	 * the connection factory or communicate with the broker
@@ -841,7 +844,72 @@ public class BlockingQueueConsumer {
 				+ ", acknowledgeMode=" + this.acknowledgeMode + " local queue size=" + this.queue.size();
 	}
 
-	private final class InternalConsumer extends DefaultConsumer {
+
+	public BlockingQueue getQueue(){
+		return this.queue;
+	}
+
+	public void setQueue(BlockingQueue queue){
+		this.queue = queue;
+	}
+	private int additiveHash(String key, int prime)
+	{
+		int hash, i;
+		for (hash = key.length(), i = 0; i < key.length(); i++) {
+			hash += key.charAt(i);
+		}
+		return (hash % prime);
+	}
+
+
+	private class shardInternalConsumer extends InternalConsumer{
+		private shardInternalConsumer(Channel channel) {
+			super(channel);
+		}
+		@Override
+		public void handleDelivery(String consumerTag, Envelope envelope, AMQP.BasicProperties properties, byte[] body)
+				throws IOException {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Storing delivery for consumerTag: '"
+						+ consumerTag + "' with deliveryTag: '" + envelope.getDeliveryTag() + "' in "
+						+ BlockingQueueConsumer.this);
+			}
+
+			Map<String, String> msg = objectMapper.readValue(body, new TypeReference<Map<String,Object>>(){});
+			Integer shard = additiveHash(msg.get("1111"),7);
+			BlockingQueueConsumer blockingQueueConsumer = BlockingQueueConsumer.this.shardQueueConsumerMap.get(shard);
+			if(blockingQueueConsumer == null){
+				BlockingQueueConsumer.this.simpleMessageListenerContainer.AddShardConsumer(shard);
+			}
+			BlockingQueue queue = blockingQueueConsumer.getQueue();
+			try {
+				if (blockingQueueConsumer.abortStarted > 0) {
+					if (!queue.offer(new Delivery(consumerTag, envelope, properties, body),
+							BlockingQueueConsumer.this.shutdownTimeout, TimeUnit.MILLISECONDS)) {
+						RabbitUtils.setPhysicalCloseRequired(getChannel(), true);
+						// Defensive - should never happen
+						BlockingQueueConsumer.this.queue.clear();
+						getChannel().basicNack(envelope.getDeliveryTag(), true, true);
+						getChannel().basicCancel(consumerTag);
+						try {
+							getChannel().close();
+						}
+						catch (TimeoutException e) {
+							// no-op
+						}
+					}
+				}
+				else {
+					BlockingQueueConsumer.this.queue.put(new Delivery(consumerTag, envelope, properties, body));
+				}
+			}
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	private class InternalConsumer extends DefaultConsumer {
 
 		private InternalConsumer(Channel channel) {
 			super(channel);

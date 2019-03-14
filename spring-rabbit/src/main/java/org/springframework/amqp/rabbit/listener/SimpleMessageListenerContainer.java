@@ -27,12 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executor;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -200,6 +195,12 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 	private volatile ConsumerTagStrategy consumerTagStrategy;
 
 	private volatile ApplicationEventPublisher applicationEventPublisher;
+
+	private Map<Integer,BlockingQueueConsumer> shardQueueConsumerMap = new ConcurrentHashMap<Integer, BlockingQueueConsumer>();
+
+	private volatile boolean shard;
+
+	private String keyProperty;
 
 	private final ContainerDelegate delegate = new ContainerDelegate() {
 
@@ -973,11 +974,15 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 		synchronized (this.consumersMonitor) {
 			if (this.consumers == null) {
 				this.cancellationLock.reset();
-				this.consumers = new HashSet<BlockingQueueConsumer>(this.concurrentConsumers);
-				for (int i = 0; i < this.concurrentConsumers; i++) {
-					BlockingQueueConsumer consumer = createBlockingQueueConsumer();
-					this.consumers.add(consumer);
-					count++;
+				if(shard) {
+					this.consumers = new HashSet<BlockingQueueConsumer>();
+				}else {
+					this.consumers = new HashSet<BlockingQueueConsumer>(this.concurrentConsumers);
+					for (int i = 0; i < this.concurrentConsumers; i++) {
+						BlockingQueueConsumer consumer = createBlockingQueueConsumer();
+						this.consumers.add(consumer);
+						count++;
+					}
 				}
 			}
 		}
@@ -1102,6 +1107,15 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 					this.addAndStartConsumers(1);
 					this.lastConsumerStarted = now;
 				}
+			}
+		}
+	}
+
+	public void AddShardConsumer(Integer shard) {
+		synchronized (this.consumersMonitor) {
+			if (this.shardQueueConsumerMap.get(shard) == null) {
+				this.addAndStartConsumers(1);
+				this.lastConsumerStarted = System.currentTimeMillis();;
 			}
 		}
 	}
