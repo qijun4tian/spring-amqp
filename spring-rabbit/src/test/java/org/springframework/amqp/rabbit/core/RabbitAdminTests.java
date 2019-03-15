@@ -231,7 +231,7 @@ public class RabbitAdminTests {
 		rabbitAdmin.deleteExchange("testex.all");
 	}
 
-	@Test
+//	@Test
 	public void testMultiEntities() {
 		ConfigurableApplicationContext ctx = new AnnotationConfigApplicationContext(Config.class);
 		RabbitTemplate template = ctx.getBean(RabbitTemplate.class);
@@ -256,7 +256,7 @@ public class RabbitAdminTests {
 		ctx.close();
 	}
 
-	@Test
+//	@Test
 	public void testMultiEntitiesSuppressed() {
 		ConfigurableApplicationContext ctx = new AnnotationConfigApplicationContext(Config1.class);
 		RabbitAdmin admin = ctx.getBean(RabbitAdmin.class);
