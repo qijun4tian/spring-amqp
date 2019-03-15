@@ -17,6 +17,7 @@
 package org.springframework.amqp.rabbit.listener;
 
 import java.io.IOException;
+import java.lang.annotation.ElementType;
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -156,9 +157,41 @@ public class BlockingQueueConsumer {
 
 	private String keyProperty;
 
-	private int prime;
+	private volatile Integer maxConcurrentConsumers;
 
-	private SimpleMessageListenerContainer simpleMessageListenerContainer;
+	private volatile boolean hashShard;
+
+	private volatile int shardNumber;
+
+	public int getShardNumber() {
+		return shardNumber;
+	}
+
+	public void setShardNumber(int shardNumber) {
+		this.shardNumber = shardNumber;
+	}
+
+	public void setMessageListenerContainer(SimpleMessageListenerContainer messageListenerContainer) {
+		this.messageListenerContainer = messageListenerContainer;
+	}
+
+	private SimpleMessageListenerContainer messageListenerContainer;
+
+
+	public void setShardQueueConsumerMap(Map<Integer, BlockingQueueConsumer> shardQueueConsumerMap) {
+		this.shardQueueConsumerMap = shardQueueConsumerMap;
+	}
+
+	public void setMaxConcurrentConsumers(Integer maxConcurrentConsumers) {
+		this.maxConcurrentConsumers = maxConcurrentConsumers;
+	}
+	public void setKeyProperty(String keyProperty) {
+		this.keyProperty = keyProperty;
+	}
+
+	public void setHashShard(boolean hashShard){
+		this.hashShard = hashShard;
+	}
 	/**
 	 * Create a consumer. The consumer must not attempt to use
 	 * the connection factory or communicate with the broker
@@ -584,7 +617,11 @@ public class BlockingQueueConsumer {
 		catch (AmqpAuthenticationException e) {
 			throw new FatalListenerStartupException("Authentication failure", e);
 		}
-		this.consumer = new InternalConsumer(this.channel);
+		if(hashShard){
+			this.consumer = new shardInternalConsumer(this.channel);
+		}else {
+			this.consumer = new InternalConsumer(this.channel);
+		}
 		this.deliveryTags.clear();
 		this.activeObjectCounter.add(this);
 
@@ -845,13 +882,10 @@ public class BlockingQueueConsumer {
 	}
 
 
-	public BlockingQueue getQueue(){
+	public BlockingQueue<Delivery> getQueue(){
 		return this.queue;
 	}
 
-	public void setQueue(BlockingQueue queue){
-		this.queue = queue;
-	}
 	private int additiveHash(String key, int prime)
 	{
 		int hash, i;
@@ -876,21 +910,22 @@ public class BlockingQueueConsumer {
 			}
 
 			Map<String, String> msg = objectMapper.readValue(body, new TypeReference<Map<String,Object>>(){});
-			Integer shard = additiveHash(msg.get("1111"),7);
+			Integer shard = additiveHash(msg.get(keyProperty),maxConcurrentConsumers);
 			BlockingQueueConsumer blockingQueueConsumer = BlockingQueueConsumer.this.shardQueueConsumerMap.get(shard);
 			if(blockingQueueConsumer == null){
-				BlockingQueueConsumer.this.simpleMessageListenerContainer.AddShardConsumer(shard);
+				BlockingQueueConsumer.this.messageListenerContainer.AddShardConsumer(shard);
+				blockingQueueConsumer = BlockingQueueConsumer.this.shardQueueConsumerMap.get(shard);
 			}
-			BlockingQueue queue = blockingQueueConsumer.getQueue();
+			BlockingQueue<Delivery> queue = blockingQueueConsumer.getQueue();
 			try {
 				if (blockingQueueConsumer.abortStarted > 0) {
 					if (!queue.offer(new Delivery(consumerTag, envelope, properties, body),
-							BlockingQueueConsumer.this.shutdownTimeout, TimeUnit.MILLISECONDS)) {
-						RabbitUtils.setPhysicalCloseRequired(getChannel(), true);
+							blockingQueueConsumer.shutdownTimeout, TimeUnit.MILLISECONDS)) {
+						RabbitUtils.setPhysicalCloseRequired(blockingQueueConsumer.getChannel(), true);
 						// Defensive - should never happen
-						BlockingQueueConsumer.this.queue.clear();
-						getChannel().basicNack(envelope.getDeliveryTag(), true, true);
-						getChannel().basicCancel(consumerTag);
+						blockingQueueConsumer.queue.clear();
+						blockingQueueConsumer.getChannel().basicNack(envelope.getDeliveryTag(), true, true);
+						blockingQueueConsumer.getChannel().basicCancel(consumerTag);
 						try {
 							getChannel().close();
 						}
@@ -900,7 +935,7 @@ public class BlockingQueueConsumer {
 					}
 				}
 				else {
-					BlockingQueueConsumer.this.queue.put(new Delivery(consumerTag, envelope, properties, body));
+					blockingQueueConsumer.queue.put(new Delivery(consumerTag, envelope, properties, body));
 				}
 			}
 			catch (InterruptedException e) {

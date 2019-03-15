@@ -198,7 +198,8 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 
 	private Map<Integer,BlockingQueueConsumer> shardQueueConsumerMap = new ConcurrentHashMap<Integer, BlockingQueueConsumer>();
 
-	private volatile boolean shard;
+
+	private volatile boolean hashShard;
 
 	private String keyProperty;
 
@@ -974,15 +975,20 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 		synchronized (this.consumersMonitor) {
 			if (this.consumers == null) {
 				this.cancellationLock.reset();
-				if(shard) {
-					this.consumers = new HashSet<BlockingQueueConsumer>();
-				}else {
-					this.consumers = new HashSet<BlockingQueueConsumer>(this.concurrentConsumers);
-					for (int i = 0; i < this.concurrentConsumers; i++) {
-						BlockingQueueConsumer consumer = createBlockingQueueConsumer();
-						this.consumers.add(consumer);
-						count++;
+				this.consumers = new HashSet<BlockingQueueConsumer>(this.concurrentConsumers);
+				for (int i = 0; i < this.concurrentConsumers; i++) {
+					BlockingQueueConsumer consumer = createBlockingQueueConsumer();
+					if (this.hashShard) {
+						consumer.setHashShard(this.hashShard);
+						consumer.setKeyProperty(this.keyProperty);
+						consumer.setMaxConcurrentConsumers(this.maxConcurrentConsumers);
+						consumer.setShardQueueConsumerMap(this.shardQueueConsumerMap);
+						consumer.setMessageListenerContainer(this);
+						this.shardQueueConsumerMap.put(i,consumer);
+						consumer.setShardNumber(i);
 					}
+					this.consumers.add(consumer);
+					count++;
 				}
 			}
 		}
@@ -1114,7 +1120,41 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 	public void AddShardConsumer(Integer shard) {
 		synchronized (this.consumersMonitor) {
 			if (this.shardQueueConsumerMap.get(shard) == null) {
-				this.addAndStartConsumers(1);
+				if (this.consumers != null) {
+					if (this.maxConcurrentConsumers != null
+							&& this.consumers.size() >= this.maxConcurrentConsumers) {
+						// todo
+						return;
+					}
+					BlockingQueueConsumer consumer = createBlockingQueueConsumer();
+					this.consumers.add(consumer);
+					this.shardQueueConsumerMap.put(shard,consumer);
+					AsyncMessageProcessingConsumer processor = new AsyncMessageProcessingConsumer(consumer);
+					if (logger.isDebugEnabled()) {
+						logger.debug("Starting a new consumer: " + consumer);
+					}
+					this.taskExecutor.execute(processor);
+					if (this.applicationEventPublisher != null) {
+						this.applicationEventPublisher.publishEvent(new AsyncConsumerStartedEvent(this, consumer));
+					}
+					try {
+						FatalListenerStartupException startupException = processor.getStartupException();
+						if (startupException != null) {
+							this.consumers.remove(consumer);
+							throw new AmqpIllegalStateException("Fatal exception on listener startup", startupException);
+						}
+					}
+					catch (InterruptedException ie) {
+						Thread.currentThread().interrupt();
+					}
+					catch (Exception e) {
+						consumer.stop();
+						logger.error("Error starting new consumer", e);
+						this.cancellationLock.release(consumer);
+						this.consumers.remove(consumer);
+					}
+
+				}
 				this.lastConsumerStarted = System.currentTimeMillis();;
 			}
 		}
@@ -1205,6 +1245,15 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 						return;
 					}
 					BlockingQueueConsumer newConsumer = createBlockingQueueConsumer();
+					if (this.hashShard) {
+						newConsumer.setHashShard(this.hashShard);
+						newConsumer.setKeyProperty(this.keyProperty);
+						newConsumer.setMaxConcurrentConsumers(this.maxConcurrentConsumers);
+						newConsumer.setShardQueueConsumerMap(this.shardQueueConsumerMap);
+						newConsumer.setMessageListenerContainer(this);
+						this.shardQueueConsumerMap.put(consumer.getShardNumber(),newConsumer);
+						newConsumer.setShardNumber(consumer.getShardNumber());
+					}
 					newConsumer.setBackOffExecution(consumer.getBackOffExecution());
 					consumer = newConsumer;
 					this.consumers.add(consumer);
@@ -1566,7 +1615,8 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 							if (receivedOk) {
 								if (isActive(this.consumer)) {
 									consecutiveIdles = 0;
-									if (consecutiveMessages++ > SimpleMessageListenerContainer.this.consecutiveActiveTrigger) {
+									if (consecutiveMessages++ > SimpleMessageListenerContainer.this.consecutiveActiveTrigger
+										&& !hashShard) {
 										considerAddingAConsumer();
 										consecutiveMessages = 0;
 									}
