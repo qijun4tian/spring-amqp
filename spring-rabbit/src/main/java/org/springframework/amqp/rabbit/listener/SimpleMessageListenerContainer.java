@@ -185,7 +185,7 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
         this.hashShard = hashShard;
     }
 
-    private volatile boolean hashShard;
+    private volatile boolean hashShard = false;
 
     public String getKeyProperty() {
         return keyProperty;
